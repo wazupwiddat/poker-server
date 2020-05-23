@@ -1,0 +1,1023 @@
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Poker</title>
+    <link rel="stylesheet" href="/assets/css/poker.css?t=2">
+    <script src="//cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/2.3.0/socket.io.js"></script>
+    <script src="/assets/js/cards.js"></script>
+    <canvas id="ctx"></canvas>
+
+    <script>
+      const State = {
+        PRE_GAME: 1,
+        USER_SETUP: 2,
+        GAME_SETUP: 3,
+        GAME_SELECT_SEAT: 4,
+        GAME_BUYIN: 5,
+        GAME_PLAYING: 6,
+        GAME_SITOUT: 7,
+      }
+      Object.freeze(State);
+
+      const ActionType = {
+        ACTION_FOLD: 0,
+        ACTION_CHECK: 1,
+        ACTION_CALL: 2,
+        ACTION_BET: 3,
+        ACTION_RAISE: 4,
+	      ACTION_ALLIN: 5
+      }
+      Object.freeze(ActionType)
+
+
+      const ActionTypeStrings = {
+        0: "Fold",
+        1: "Check",
+        2: "Call",
+        3: "Bet",
+        4: "Raise",
+        5: "All In"
+      }
+
+      const gameStateObject = initializeGameState();
+      console.log(gameStateObject);
+      function initializeGameState() {
+        var gs = {
+          userName: "",
+          userId: "",
+          activeSeat: -1,
+          playerSeat: -1,
+          gameKey: "",
+          state: State.PRE_GAME,
+          connected: false,
+          button: -1
+        }
+        var jsonString = sessionStorage.getItem("gameObject");
+        if (jsonString) {
+          gs = JSON.parse(jsonString);
+          if (gs.userName == "") {
+            gs.state = State.PRE_GAME;
+          }
+        }
+        return gs
+      }
+
+      function transitionUI() {
+        switch (gameStateObject.state) {
+          case State.PRE_GAME:
+            $("#main_menu").css("display", "block");
+            $("#game_setup").css("display", "none");
+            // $("#ctx").css("display", "none");
+            $("#game_table").css("display", "none");
+            $("#username_modal").css("display", "none");
+            $("#buyin_modal").css("display", "none");
+            break;
+          case State.USER_SETUP:
+            $("#main_menu").css("display", "none");
+            $("#game_setup").css("display", "none");
+            // $("#ctx").css("display", "block");
+            $("#game_table").css("display", "block");
+            $("#username_modal").css("display", "block");
+            $("#user_name").focus();
+            $("#buyin_modal").css("display", "none");
+            break;
+          case State.GAME_BUYIN:
+            $("#main_menu").css("display", "none");
+            $("#game_setup").css("display", "none");
+            // $("#ctx").css("display", "block");
+            $("#game_table").css("display", "block");
+            $("#username_modal").css("display", "none");
+            $("#buyin_modal").css("display", "block");
+            $("#bamount").focus();
+            break;          
+          case State.GAME_SETUP:
+            $("#main_menu").css("display", "none");
+            $("#game_setup").css("display", "block");
+            // $("#ctx").css("display", "none");
+            $("#game_table").css("display", "none");
+            $("#username_modal").css("display", "none");
+            $("#buyin_modal").css("display", "none");
+            break;
+          case State.GAME_SELECT_SEAT:
+            $("#main_menu").css("display", "none");
+            $("#game_setup").css("display", "none");
+            // $("#ctx").css("display", "block");
+            $("#game_table").css("display", "block");
+            $("#username_modal").css("display", "none");
+            $("#buyin_modal").css("display", "none");      
+            $('#sitout').prop('disabled', true);
+            $('#sitin').prop("disabled",true);
+            $('#start').prop('disabled', true);
+            $('#leave').prop("disabled",true);
+            break;
+          case State.GAME_PLAYING:
+            $("#main_menu").css("display", "none");
+            $("#game_setup").css("display", "none");
+            // $("#ctx").css("display", "block");
+            $("#game_table").css("display", "block");
+            $("#username_modal").css("display", "none");
+            $("#buyin_modal").css("display", "none");            
+            if (gameStateObject.myaction) {
+              $("#action_panel").css("display", "block");
+            } else {
+              $("#action_panel").css("display", "none");
+            }
+            $('#start').prop('disabled', false);
+            if (gameStateObject.activeSeat >= 0) {
+              $('#start').prop('disabled', true);
+            }
+            if (gameStateObject.cost - seats[gameStateObject.playerSeat].chipsinround == 0) {
+              $('#buttonraise').val("Bet")
+            }else {
+              $('#buttonraise').val("Raise")
+            }
+            $('#leave').prop("disabled",false);
+            if (gameStateObject.playerSeat >= 0 && (seats[gameStateObject.playerSeat].sittingout || seats[gameStateObject.playerSeat].sittingoutnexthand)) {
+              $('#sitout').prop("disabled",true);
+              $('#sitin').prop('disabled', false);
+            } else {
+              $('#sitout').prop('disabled', false);
+              $('#sitin').prop("disabled",true);
+            }
+            break;
+        }
+      }
+
+      function saveGameState() {
+        console.log("saving game object");
+        sessionStorage.setItem("gameObject", JSON.stringify(gameStateObject));
+      }
+
+      const socket = io()
+
+      var canvas = document.getElementById("ctx")
+      var ctx = canvas.getContext("2d");
+      canvas.width = 1200;
+      canvas.height = 800;
+      canvas.style.top = "50px";
+      canvas.style.display = "block";
+      canvas.style.position = "absolute";
+      ctx.font = '14px Comic Sans MS';
+
+      function isIntersect(point, seat) {
+        return Math.sqrt((point.x-seat.x) ** 2 + (point.y - seat.y) ** 2) < seat.radius;
+      }
+
+      function getCenterOfTable() {
+        tabelCenter = {
+          x: ctx.canvas.width/2,
+          y: ctx.canvas.height/2 - 20
+        }
+        return tabelCenter;
+      }
+
+      var seats = [];
+      function initializeSeats() {
+        var a = 510;
+        var b = 300;
+        var tableCenter = getCenterOfTable();
+        var step = 360 / 9;
+        for (var i = 0; i<9; i++) {
+          var angle = (i*step);
+          var x = a * Math.cos(Math.PI * 2 * angle / 360);
+          var y = b * Math.sin(Math.PI * 2 * angle / 360);
+          x = (Math.round(x * 100) / 100) + tableCenter.x;
+          y = (Math.round(y * 100) / 100) + tableCenter.y;
+          // console.log("X="+x+"Y="+y);
+          seats.push({
+            id: i,
+            x: x,
+            y, y,
+            radius: 60,
+            taken: false,
+            name: "",
+            chips: 0,
+            buyin: 0
+          });
+        }
+      }
+      initializeSeats();
+
+      function initializeButtonLocations() {
+        var a = 450;
+        var b = 240;
+        var tableCenter = getCenterOfTable();
+        var step = 360 / 9;
+        for (var i = 0; i<9; i++) {
+          var angle = (i*step)+10;
+          var x = a * Math.cos(Math.PI * 2 * angle / 360);
+          var y = b * Math.sin(Math.PI * 2 * angle / 360);
+          x = (Math.round(x * 100) / 100) + tableCenter.x;
+          y = (Math.round(y * 100) / 100) + tableCenter.y;
+          seats[i].button = {
+            x: x,
+            y, y,
+            radius: 20
+          };
+        }
+      }
+      initializeButtonLocations();
+      
+      function initializeCardLocatons() {
+        var a = 390;
+        var b = 180;
+        var tableCenter = getCenterOfTable();
+        var step = 360 / 9;
+        for (var i = 0; i<9; i++) {
+          var angle = (i*step);
+          var x = a * Math.cos(Math.PI * 2 * angle / 360);
+          var y = b * Math.sin(Math.PI * 2 * angle / 360);
+          x = (Math.round(x * 100) / 100) + tableCenter.x;
+          y = (Math.round(y * 100) / 100) + tableCenter.y;
+          seats[i].cards = {
+            x: x,
+            y, y
+          };
+        }        
+      }
+      initializeCardLocatons();
+
+      function intializeChipLocations() {
+        var a = 330;
+        var b = 105;
+        var tableCenter = getCenterOfTable();
+        var step = 360 / 9;
+        for (var i = 0; i<9; i++) {
+          var angle = (i*step);
+          var x = a * Math.cos(Math.PI * 2 * angle / 360);
+          var y = b * Math.sin(Math.PI * 2 * angle / 360);
+          x = (Math.round(x * 100) / 100) + tableCenter.x;
+          y = (Math.round(y * 100) / 100) + tableCenter.y;
+          seats[i].chipLocation = {
+            x: x,
+            y, y
+          };
+        }  
+      }
+      intializeChipLocations();
+
+      ctx.canvas.addEventListener('click', (e) => {
+        if (gameStateObject.state == State.GAME_SELECT_SEAT) {
+          const pos = {
+            x: e.clientX,
+            y: e.clientY
+          };
+          seats.forEach(seat => {
+            if (isIntersect(pos, seat)) {
+              socket.emit("selectSeat", seat.id);
+              return;
+            }
+          });
+        }
+        if (gameStateObject.state == State.GAME_PLAYING &&
+            gameStateObject.playerCards && gameStateObject.winners) {
+          const pos = {
+            x: e.clientX,
+            y: e.clientY
+          };
+          seats.forEach(seat => {
+            if (isIntersect(pos, seat)) {
+              console.log("Request to show cards");
+              socket.emit("showmycards");
+              return;
+            }
+          });
+        }
+      });
+
+      function getFoldAction() {
+        action = {
+          Type: ActionType.ACTION_FOLD,
+          Chips: 0
+        };
+        return action;
+      }
+
+      function getCheckAction() {
+        action = {
+          Type: ActionType.ACTION_CHECK,
+          Chips: 0
+        };
+        return action;
+      }
+
+      function getCallAction() {
+        action = {
+          Type: ActionType.ACTION_CALL,
+          Chips: 0
+        };
+        return action;
+      }
+
+      function getRaiseAction(raise) {
+        action = {
+          Type: ActionType.ACTION_RAISE,
+          Chips: raise
+        };
+        return action;
+      }
+
+      function getBetAction(amt) {
+        action = {
+          Type: ActionType.ACTION_BET,
+          Chips: amt
+        };
+        return action;
+      }
+
+      var timeoutRGB = {
+        r: 0,
+        g: 255,
+        b: 255
+      }
+      function resetTimoutActivePlayerBlur() {
+        timeoutRGB = {
+          r: 255,
+          g: 255,
+          b: 0
+        }
+      }
+
+      function timeoutIncrementer() {
+        var step = 255 / 30; // at the 30 second mark we should be full intensity
+        timeoutRGB = {
+          r: timeoutRGB.r,
+          g: timeoutRGB.g - step,
+          b: timeoutRGB.b
+        }
+      }
+
+      setInterval(timeoutIncrementer, 1000); // update every second
+
+      // Canvas drawing functions
+      function drawGamePlay() {
+        drawBackground();
+        drawPlayersSeats();
+        drawCommunityCards();
+        drawPots();
+        drawLastWinningHand();
+      }
+            
+      function drawAll() {
+        if (gameStateObject.state == State.PRE_GAME) {
+          drawBackground();
+          return;
+        }
+        if (gameStateObject.state == State.GAME_SELECT_SEAT) {
+          drawSeatSelection();
+          return;
+        }
+         drawGamePlay();
+      }
+
+      function drawBackground() {
+        var w = ctx.canvas.width;
+        var h = ctx.canvas.height;
+        var img = $("#background").get(0);
+        ctx.drawImage(img, 0, 0, w, h);
+      }
+
+      function drawPlayerSelection(i, seat) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(seat.x, seat.y, 60, 0, 2 * Math.PI);
+        ctx.fillStyle = '#949494';
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = "black";
+        ctx.fill();
+        ctx.restore();
+
+        if (seat.taken) {
+          if (seat.name != "") {
+            ctx.fillText(seat.name, seat.x, seat.y-30);
+            return;
+          }
+          // has yet to assign a name to the player
+          ctx.fillText("Anonymous", seat.x, seat.y-30);
+          return;
+        }
+        // no play occupies this seat
+        ctx.fillText("Open Seat", seat.x, seat.y);
+      }
+
+      function drawPlayerArea(i, seat) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(seat.x, seat.y, 60, 0, 2 * Math.PI);
+        ctx.fillStyle = '#949494';
+        if (gameStateObject.activeSeat == i && !seat.isWinner) {
+          ctx.shadowBlur = 40;
+          ctx.shadowColor = 'rgb(' + Math.round(timeoutRGB.r) + ','
+                                              + Math.round(timeoutRGB.g) + ','
+                                              + Math.round(timeoutRGB.b) + ')';
+        } else {
+          ctx.shadowBlur = 20;
+          ctx.shadowColor = "black";
+        }
+        ctx.fill();
+        ctx.restore();
+        
+        ctx.fillText(seat.name, seat.x, seat.y-30);
+        ctx.fillText(seat.chips, seat.x, seat.y);
+        if (seat.actiontype != -1) {
+          ctx.save();
+          ctx.fillStyle = "darkgreen";
+          ctx.shadowBlur = 5;
+          ctx.shadowColor = "white"
+          ctx.fillText(ActionTypeStrings[seat.actiontype], seat.x, seat.y+50);
+          ctx.restore();
+        }
+        if (seat.sittingout) {
+          ctx.save();
+          ctx.translate(seat.x, seat.y);
+          ctx.fillStyle = "Red";
+          ctx.rotate(-Math.PI / 4);
+          ctx.fillText("Sitting Out", 0, 0);
+          ctx.restore();
+        } else if (seat.sittingoutnexthand) {
+          ctx.save();
+          ctx.translate(seat.x, seat.y);
+          ctx.fillStyle = "Yellow";
+          ctx.rotate(-Math.PI / 4);
+          ctx.fillText("Last Hand", 0, 0);
+          ctx.restore();
+        }
+        // } else if (seat.missedbb && seat.eligibletoreturn) {
+        //   ctx.save();
+        //   ctx.translate(seat.x, seat.y);
+        //   ctx.fillStyle = "green";
+        //   ctx.rotate(-Math.PI / 4);
+        //   ctx.fillText("Waiting on BB", 0, 0);
+        //   ctx.restore();
+        // }
+        if (gameStateObject.button == i) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(seat.button.x, seat.button.y, 20, 0, 2 * Math.PI);
+          ctx.fillStyle = 'red';
+          ctx.shadowBlur = 20;
+          ctx.shadowColor = "black";
+          ctx.fill();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = 'black';
+          ctx.stroke();
+          ctx.fillStyle = 'black';
+          ctx.fillText("B", seat.button.x, seat.button.y+5);
+          ctx.restore();
+        }
+        if (gameStateObject.playerSeat == i) {
+          if (gameStateObject.playerCards && gameStateObject.playerCards.length == 2) {
+            if (seat.folded) {
+              ctx.save();
+              ctx.globalAlpha=0.4;
+              ctx.shadowBlur = 5;
+              ctx.shadowColor = "black";
+              var card1 = getCardImage(gameStateObject.playerCards[0]);
+              var card2 = getCardImage(gameStateObject.playerCards[1]);
+              if (card1) ctx.drawImage(card1, seat.cards.x-40, seat.cards.y-50, 60, 87);
+              if (card2) ctx.drawImage(card2, seat.cards.x-20, seat.cards.y-30, 60, 87);
+              ctx.restore();
+              ctx.fillText("Click to Reveal", seat.x, seat.y+20);
+            } else {
+              ctx.save();
+              ctx.shadowBlur = 5;
+              ctx.shadowColor = "black";
+              var card1 = getCardImage(gameStateObject.playerCards[0]);
+              var card2 = getCardImage(gameStateObject.playerCards[1]);
+              if (card1) ctx.drawImage(card1, seat.cards.x-40, seat.cards.y-50, 60, 87);
+              if (card2) ctx.drawImage(card2, seat.cards.x-20, seat.cards.y-30, 60, 87);
+              ctx.restore();
+            }
+          }
+        } else if (!seat.folded && !seat.sittingout) {
+          ctx.save();
+          ctx.shadowBlur = 5;
+          ctx.shadowColor = "black";
+          var card = getCardImage("player_card");
+          ctx.drawImage(card, seat.cards.x-40, seat.cards.y-50, 60, 87);
+          ctx.drawImage(card, seat.cards.x-20, seat.cards.y-30, 60, 87);
+          ctx.restore();
+        }
+        if (seat.revealcards && seat.revealcards.length == 2) {
+          ctx.save();
+          ctx.shadowBlur = 5;
+          ctx.shadowColor = "black";
+          var card1 = getCardImage(seat.revealcards[0]);
+          var card2 = getCardImage(seat.revealcards[1]);
+          if (card1) ctx.drawImage(card1, seat.cards.x-40, seat.cards.y-50, 60, 87);
+          if (card2) ctx.drawImage(card2, seat.cards.x-20, seat.cards.y-30, 60, 87);
+          ctx.restore();
+        }
+        if (seat.chipsinround > 0) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(seat.chipLocation.x, seat.chipLocation.y, 10, 0, 2 * Math.PI); 
+          if (seat.chipsinround < 10) {
+            ctx.fillStyle = 'white';
+          } else if (seat.chipsinround < 20) {
+            ctx.fillStyle = 'red';
+          } else if (seat.chipsinround < 50) {
+            ctx.fillStyle = 'yellow';
+          } else if (seat.chipsinround < 100) {
+            ctx.fillStyle = 'green';
+          } else {
+            ctx.fillStyle = 'black';
+          }
+          ctx.shadowBlur = 5;
+          ctx.shadowColor = "black";
+          ctx.fill();
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = 'black';
+          ctx.stroke();
+          ctx.fillStyle = 'black';
+          if (seat.chipsinround >= 100) {
+            ctx.fillStyle = 'white';
+          }
+          ctx.fillText(seat.chipsinround, seat.chipLocation.x, seat.chipLocation.y+5);
+          ctx.restore();
+        }
+      }
+
+      function drawSeatSelection() {
+        drawBackground();
+
+        ctx.textAlign = "center";
+        for (var i = 0; i<seats.length; i++) {
+          drawPlayerSelection(i+1, seats[i]);
+        }
+      }
+
+      function drawPlayersSeats() {
+        drawBackground();
+
+        ctx.textAlign = "center";
+        for (var i = 0; i<seats.length; i++) {
+          if (seats[i].taken) {
+            drawPlayerArea(i, seats[i]);
+          }
+        }
+      }
+
+      function drawCommunityCards() {
+        if (gameStateObject.cards) {
+          var cardWidth = 60
+          var cardHeight = 87
+          var ct = getCenterOfTable();
+          var startx = ct.x - (5*cardWidth/2)
+          var starty = ct.y
+          ctx.save();
+          ctx.shadowBlur = 5;
+          ctx.shadowColor = "black";
+          for (var i = 0; i<gameStateObject.cards.length; i++) {
+            var card = getCardImage(gameStateObject.cards[i])
+            ctx.drawImage(card, startx + (i*(cardWidth+10)), starty - (cardHeight/2), cardWidth, cardHeight);
+          }
+          ctx.restore();
+        }
+      }
+
+      function drawPots() {
+        if (!gameStateObject.pots) return;
+        var ct = getCenterOfTable();
+        if (gameStateObject.pots.length >= 1) {
+          var pot = gameStateObject.pots[0];
+          ctx.save()
+          ctx.textAlign = "left";
+          ctx.beginPath();
+          ctx.rect(ct.x-50, ct.y-80, 100, 18);
+          ctx.fillStyle = 'grey';
+          ctx.shadowBlur = 5;
+          ctx.shadowColor = "black";
+          ctx.fill();
+          ctx.strokeStyle = 'black';
+          ctx.stroke();
+          ctx.fillStyle = 'black';
+          ctx.fillText("Pot: " + pot.Chips, ct.x-40, ct.y-65);
+          ctx.restore();
+        }
+        if (gameStateObject.pots.length >= 2) {
+          var pot = gameStateObject.pots[1];
+          ctx.save()
+          ctx.textAlign = "left";
+          ctx.beginPath();
+          ctx.rect(ct.x-50, ct.y+80, 100, 18);
+          ctx.stroke();
+          ctx.fillText("Round: " + pot.Chips, ct.x-40, ct.y+95);
+          ctx.restore();
+        }
+      }
+
+      function drawLastWinningHand() {
+        if (gameStateObject.lastWinner) {
+          var ct = getCenterOfTable();
+          ctx.save();
+          ctx.globalAlpha=.50;
+          ctx.fillStyle="black";
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.restore();
+
+          ctx.save()
+          ctx.font = '24px Comic Sans MS';
+          ctx.fillStyle = "white";
+          ctx.fillText(gameStateObject.lastWinner.description, ct.x, ct.y+75);
+          ctx.restore();
+
+          for (var i = 0; i<seats.length; i++) {
+            if (seats[i].isWinner) {
+              drawPlayerArea(i, seats[i]);
+            }
+          }
+          // redraw cards in winning hand
+          var cardWidth = 60
+          var cardHeight = 87
+          var ct = getCenterOfTable();
+          var startx = ct.x - (5*cardWidth/2)
+          var starty = ct.y
+          ctx.save();
+          ctx.shadowBlur = 5;
+          ctx.shadowColor = "black";
+          for (var i = 0; i<gameStateObject.cards.length; i++) {
+            for (var c = 0; c<gameStateObject.lastWinner.cards.length; c++) {
+              if (gameStateObject.cards[i] == gameStateObject.lastWinner.cards[c]) {
+                var card = getCardImage(gameStateObject.cards[i]);
+                ctx.drawImage(card, startx + (i*(cardWidth+10)), starty - (cardHeight/2), cardWidth, cardHeight);
+                break;
+              }
+            }
+          }
+          ctx.restore();
+        }
+      }
+
+      setInterval(drawAll, 1000/10);
+
+      // hanlde responses from the server
+      socket.on('connect', function() {
+        console.log("connected to socket" );
+        if (gameStateObject.gameKey != "" &&
+            gameStateObject.userName != "" &&
+            gameStateObject.playerSeat >= 0) {
+          socket.emit('rejoinGame', gameStateObject.gameKey, gameStateObject.playerSeat, gameStateObject.userName);
+          return;
+        }
+        gameStateObject.connected = true;
+      });
+      socket.on('disconnect', function() {
+        console.log("disconnected from socket" );
+        gameStateObject.connected = false;
+      });
+      socket.on('createGameResponse', function(gamekey) {
+        console.log(gamekey);
+        gameStateObject.state = State.GAME_SELECT_SEAT;
+        gameStateObject.gameKey = gamekey;
+        $('#game_key').val(gameStateObject.gameKey);
+        saveGameState();
+        transitionUI();
+      });
+      socket.on('createGameErr', function(err) {
+        console.log(err)
+      });
+      socket.on('newJoinResponse', function(gamekey) {
+        gameStateObject.state = State.GAME_SELECT_SEAT;
+        gameStateObject.gameKey = gamekey;
+        $('#game_key').val(gameStateObject.gameKey);
+        saveGameState();
+        transitionUI();
+      });
+      socket.on('newJoinError', function(err) {
+        console.log(err);
+        gameStateObject.state = State.PRE_GAME;
+        saveGameState();
+      });
+      socket.on('chatResponse', function(chat) {
+        $('#chat_text').val('');
+
+        var newDiv = $('<div><p><b>'+chat.User+'</b> : '+chat.Message+'</p></div>')
+        $('chat_log').append(newDiv);
+        $('#chat_panel').animate({scrollTop: $('#chat_panel').prop("scrollHeight")}, 190);
+        console.log("User id: " + chat.User);
+        console.log("Message: " + chat.Message);
+      });
+      socket.on('selectSeatResponse', function(selected) {
+        gameStateObject.state = State.GAME_BUYIN;
+        if (gameStateObject.userName == "") {
+          gameStateObject.state = State.USER_SETUP;
+        } else {
+          socket.emit('username', gameStateObject.userName);
+        }
+        gameStateObject.playerSeat = selected;
+        saveGameState();
+        transitionUI();
+      });
+      socket.on('selectSeatErr', function(err) {
+        console.log(err);
+      });
+      socket.on('leaveSeatResponse', function() {
+        gameStateObject.state = State.GAME_SELECT_SEAT;
+        gameStateObject.playerSeat = -1;
+        gameStateObject.state = State.PRE_GAME;
+        saveGameState();
+        transitionUI();
+      });
+      socket.on('tableUpdate', function(tableUpdate) {
+        console.log("tableUpdate called");
+        console.log(tableUpdate);
+        gameStateObject.round = tableUpdate.GameUpdate.Round;
+        gameStateObject.activeSeat = -1;
+        if (tableUpdate.GameUpdate.Active) {
+          resetTimoutActivePlayerBlur();
+          gameStateObject.activeSeat = tableUpdate.GameUpdate.Active.Seat;
+        }
+        if (!gameStateObject.playerCards || gameStateObject.button != tableUpdate.GameUpdate.Button) {
+          // new round
+          socket.emit("peekatcards");
+        }
+        if (tableUpdate.GameUpdate.Pots && tableUpdate.GameUpdate.Pots.length >= 0) {
+          gameStateObject.pots = tableUpdate.GameUpdate.Pots
+        }
+        gameStateObject.button = tableUpdate.GameUpdate.Button;
+        gameStateObject.cost = tableUpdate.GameUpdate.Cost;
+        gameStateObject.myaction = gameStateObject.activeSeat == gameStateObject.playerSeat;
+        gameStateObject.cards = tableUpdate.GameUpdate.Cards;
+        gameStateObject.lastWinner = tableUpdate.GameUpdate.LastWinner;
+        gameStateObject.winners = tableUpdate.GameUpdate.Winners;
+
+        for (var i = 0; i<tableUpdate.Seats.length; i++) {
+          if (!tableUpdate.Seats[i]) {
+            seats[i].taken = false;
+            seats[i].name = "";
+            continue
+          }
+          seats[i].isWinner = false;
+          if (gameStateObject.winners) {
+            for (var w = 0; w<gameStateObject.winners.length; w++) {
+              if (i == gameStateObject.winners[w].Seat) {
+                seats[i].isWinner = true;
+                console.log("We marked a winner");
+              }
+            }
+          }
+
+          seats[i].taken = true;
+          seats[i].name = tableUpdate.Seats[i].Name;
+          seats[i].chips = tableUpdate.Seats[i].ChipCount;
+          seats[i].buyin = tableUpdate.Seats[i].BuyIn;
+          seats[i].acted = tableUpdate.Seats[i].Acted;
+          seats[i].allin = tableUpdate.Seats[i].AllIn;
+          seats[i].chipsinpot = tableUpdate.Seats[i].ChipsInPot;
+          seats[i].chipsinround = tableUpdate.Seats[i].ChipsInRound;
+          seats[i].missedbb = tableUpdate.Seats[i].MissedBB;
+          seats[i].sittingout = tableUpdate.Seats[i].SittingOut;
+          seats[i].sittingoutnexthand = tableUpdate.Seats[i].SittingOutNextHand;
+          // seats[i].eligibletoreturn = tableUpdate.Seats[i].EligibleToReturn;
+          seats[i].folded = tableUpdate.Seats[i].Folded;
+          seats[i].revealcards = tableUpdate.Seats[i].Reveal;
+          seats[i].actiontype = tableUpdate.Seats[i].Action;
+        }
+        transitionUI();
+      });
+
+      socket.on('rejoinGameResponse', function() {
+        console.log("rejoinGameRepsonse");
+        gameStateObject.connected = true;
+        $('#game_key').val(gameStateObject.gameKey);
+        transitionUI();
+      })
+      socket.on('rejoinGameResponseError', function() {
+        console.log("rejoinGameRepsonseError");
+        gameStateObject.gameKey = "";
+        gameStateObject.playerSeat = -1;
+        gameStateObject.state = State.PRE_GAME;
+        gameStateObject.playerCards = null;
+        gameStateObject.cards = null;
+        saveGameState()
+        transitionUI();
+      });
+      socket.on('playerCards', function(cards) {
+        gameStateObject.playerCards = cards;
+      });
+      socket.on('actionError', function(err) {
+        console.log(err);
+      });
+
+      // handling events from the DOM
+      $(document).ready(function() {
+        $("#new").click(function(event) {
+          console.log("New game clicked")
+          gameStateObject.state = State.GAME_SETUP
+          saveGameState();
+          transitionUI();
+        });
+        $("#join").click(function(event) {
+          console.log("Join game clicked")
+          var gameKey = $("#joingamekey").val();
+          console.log(gameKey);
+                    
+          socket.emit("joinGame", gameKey);
+        });
+
+        // Create new game submit
+        $("#submit").click(function(event) {
+          console.log("Submit clicked")
+          options = {
+            variant: 1
+          }
+          var optJson = JSON.stringify(options);
+          socket.emit("createGame", optJson);
+        });
+
+        // chat text box enter
+        $("#chat_text").keyup(function(e) {
+          if (e.key == "Enter") {
+            console.log('chat just sent...')
+            var cht = $(this).val();
+            socket.emit('chat', cht);
+          }
+        });
+
+        // after selecting seat ask for buyin amount
+        $('#buttoncn').click(function(event) {
+          socket.emit('leaveSeat');
+        });
+        $('#bamount').keyup(function(event) {
+          if (event.key == "Escape") {
+            $('#buttoncn').click();
+          }
+          if (event.key == "Enter") {
+            $('#buttonok').click();
+          }
+        })
+        $('#buttonok').click(function(event) {
+          console.log("button ok clicked")
+          var buyInAmt = $('#bamount').val();
+          var b = parseInt(buyInAmt)
+          if (b) {
+            socket.emit('buyChips', b);
+            gameStateObject.state = State.GAME_PLAYING;
+            saveGameState();
+            transitionUI();
+          }
+        });
+
+        $('#user_buttoncn').click(function(event) {
+          socket.emit('leaveSeat');
+        });
+        $('#user_name').keyup(function(event) {
+          if (event.key == "Escape") {
+            $('#user_buttoncn').click();
+          }
+          if (event.key == "Enter") {
+            $('#user_buttonok').click();
+          }
+        });
+        $('#user_buttonok').click(function(event) {
+          console.log("username button ok clicked")
+          var uname = $('#user_name').val();
+          if (uname.length > 1) {
+            socket.emit('username', uname);
+            gameStateObject.userName = uname;
+            gameStateObject.state = State.GAME_BUYIN;
+            saveGameState();
+            transitionUI();
+          }
+        });
+        $('#sitout').click(function(event) {
+          socket.emit('sitout');
+        });
+        $('#sitin').click(function(event) {
+          socket.emit('sitin');
+        });
+        $('#leave').click(function(event) {
+          socket.emit('leaveSeat');
+        });
+        $('#start').click(function(event) {
+          socket.emit('start');
+        });
+        $('#buttonfold').click(function(event) {
+          socket.emit('action', getFoldAction());
+        });
+        $('#buttoncheck').click(function(event) {
+          socket.emit('action', getCheckAction());
+        });
+        $('#buttoncall').click(function(event) {
+          socket.emit('action', getCallAction());
+        });
+        $('#buttonraise').click(function(event) {
+          var raiseAmt = $('#text_raise').val();
+          var a = parseInt(raiseAmt);
+          if (gameStateObject.cost - seats[gameStateObject.playerSeat].chipsinround == 0) {
+            socket.emit('action', getBetAction(a));
+          } else {
+            socket.emit('action', getRaiseAction(a));
+          }
+        });
+      });
+    </script>
+  </head>
+  <body >
+    <div id="main_menu">
+      <input type="button" id="new" name="new" value="New Game">
+      <input type="button" id="join" name="join" value="Join Game">
+      <input type="text" id="joingamekey" name="joingamekey">
+    </div>
+    <div id="game_setup" style="display: none;">
+      <input type="button" id="submit" name="submit" value="Submit and Start">
+    </div>
+    <div id="game_table" style="display: none;">
+      <input type="button" id="start" name="new" value="Start Game" disabled>
+      <input type="button" id="leave" name="leave" value="Leave Game" disabled>
+      <input type="button" id="sitout" name="sitout" value="Sit out" disabled>
+      <input type="button" id="sitin" name="sitin" value="Return" disabled>
+      <input type="text" id="game_key" style="width: 100; text-align: center;" readonly>
+      <img id="background" src="/assets/images/table1.png" style="display: none;">
+      <div id="chat_panel" style="position: fixed; top: 600; left: 20; height: 190; width: 300; overflow-y: auto; color: antiquewhite;">
+        <chat_log></chat_log> 
+      </div>
+      <input type="text" id="chat_text" name="chat_text" placeholder="chat..." style="position: fixed; top: 850; left: 5; width: 300; ">
+      <div id="action_panel" style="display: none; position: fixed; top: 850; left: 500">
+        <input type="button" id="buttonfold" value="Fold">
+        <input type="button" id="buttoncheck" value="Check">
+        <input type="button" id="buttoncall" value="Call">
+        <input type="button" id="buttonraise" value="Raise">
+        <input type="text" id="text_raise" name="text_raise" placeholder="$...">
+      </div>
+    </div>
+    <div id="buyin_modal" class="modal" style="position: absolute; z-index: 1; top: 50%; left: 50%; width: 300; height: 300; display: none; background-color: #474e5d; transform: translate(-50%,-50%);">
+      <div class="container" style="text-align: center;">
+        <h2>Buy-in</h2>
+        <p>Enter the amount you would like to buy-in</p>
+        <input type="text" id="bamount" placeholder="$">
+        <div>
+          <input type="button" id="buttonok" value="Ok">
+          <input type="button" id="buttoncn" value="Cancel">
+        </div>
+      </div>
+    </div>
+    <div id="username_modal" class="modal" style="position: absolute; z-index: 1; top: 50%; left: 50%; width: 300; height: 300; display: none; background-color: #474e5d; transform: translate(-50%,-50%);">
+      <div class="container" style="text-align: center;">
+        <h2>Username</h2>
+        <p>Pick your name you want to use in game</p>
+        <input type="text" id="user_name" placeholder="Username...">
+        <div>
+          <input type="button" id="user_buttonok" value="Ok">
+          <input type="button" id="user_buttoncn" value="Cancel">
+        </div>
+      </div>
+    </div>
+    <div id="preload" style="display: none;">
+      <img src="/assets/images/2_of_diamonds.svg" id="2♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/3_of_diamonds.svg" id="3♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/4_of_diamonds.svg" id="4♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/5_of_diamonds.svg" id="5♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/6_of_diamonds.svg" id="6♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/7_of_diamonds.svg" id="7♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/8_of_diamonds.svg" id="8♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/9_of_diamonds.svg" id="9♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/10_of_diamonds.svg" id="T♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/jack_of_diamonds.svg" id="J♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/queen_of_diamonds.svg" id="Q♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/king_of_diamonds.svg" id="K♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/ace_of_diamonds.svg" id="A♦" width="1" height="1" alt="Image 01" />
+      <img src="/assets/images/2_of_clubs.svg" id="2♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/3_of_clubs.svg" id="3♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/5_of_clubs.svg" id="4♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/5_of_clubs.svg" id="5♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/6_of_clubs.svg" id="6♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/7_of_clubs.svg" id="7♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/8_of_clubs.svg" id="8♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/9_of_clubs.svg" id="9♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/10_of_clubs.svg" id="T♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/jack_of_clubs.svg" id="J♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/queen_of_clubs.svg" id="Q♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/king_of_clubs.svg" id="K♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/ace_of_clubs.svg" id="A♣" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/2_of_hearts.svg" id="2♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/3_of_hearts.svg" id="3♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/4_of_hearts.svg" id="4♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/5_of_hearts.svg" id="5♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/6_of_hearts.svg" id="6♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/7_of_hearts.svg" id="7♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/8_of_hearts.svg" id="8♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/9_of_hearts.svg" id="9♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/10_of_hearts.svg" id="T♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/jack_of_hearts.svg" id="J♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/queen_of_hearts.svg" id="Q♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/king_of_hearts.svg" id="K♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/ace_of_hearts.svg" id="A♥" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/2_of_spades.svg" id="2♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/3_of_spades.svg" id="3♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/4_of_spades.svg" id="4♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/5_of_spades.svg" id="5♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/6_of_spades.svg" id="6♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/7_of_spades.svg" id="7♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/8_of_spades.svg" id="8♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/9_of_spades.svg" id="9♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/10_of_spades.svg" id="T♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/jack_of_spades.svg" id="J♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/queen_of_spades.svg" id="Q♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/king_of_spades.svg" id="K♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/ace_of_spades.svg" id="A♠" width="1" height="1" alt="Image 02" />
+      <img src="/assets/images/player_card.png" id="player_card" width="1" height="1" alt="Image 02" />
+   </div>
+</html>
